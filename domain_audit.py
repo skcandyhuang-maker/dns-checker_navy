@@ -18,7 +18,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="Andy的全能網管工具 (海軍 v13修正版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (海軍 v14版)", layout="wide")
 
 # ==========================================
 #  資料庫 (SQLite) 核心模組
@@ -446,7 +446,7 @@ tab1, tab2 = st.tabs([" 域名檢測", " IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("Andy 的批量域名體檢工具-海軍 v13版")
+    st.header("Andy 的批量域名體檢工具-海軍 v14版")
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
@@ -500,6 +500,13 @@ with tab1:
                 st.balloons()
                 time.sleep(1)
                 st.rerun()
+
+    # v14優化：直接在網頁下方顯示當前資料庫內容
+    if not df_domains.empty:
+        st.divider()
+        st.subheader(" 檢測結果預覽")
+        st.dataframe(df_domains, use_container_width=True, height=400)
+
 
 # --- 分頁 2: IP 反查 ---
 with tab2:
