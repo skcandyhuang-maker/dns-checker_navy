@@ -18,7 +18,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題 (更新為 v15)
-st.set_page_config(page_title="Andy的全能網管工具 (陸軍 v15版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (UAT v15版)", layout="wide")
 
 # ==========================================
 #  資料庫 (SQLite) 核心模組
@@ -37,7 +37,7 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
+
     # v15 新增欄位：動態升級現有資料表，若無欄位則自動加上
     try:
         c.execute("ALTER TABLE domain_audit ADD COLUMN security_headers TEXT DEFAULT '-'")
@@ -73,8 +73,8 @@ def save_domain_result(data):
         # v15 更新：加入 security_headers, tls_old 與 can_be_embedded 寫入
         c.execute('''
             INSERT OR REPLACE INTO domain_audit (
-                domain, cdn_provider, cloud_hosting, multi_ip, cname, ips, 
-                country, city, isp, tls_1_3, protocol, issuer, ssl_days, 
+                domain, cdn_provider, cloud_hosting, multi_ip, cname, ips,
+                country, city, isp, tls_1_3, protocol, issuer, ssl_days,
                 global_ping, simple_ping, security_headers, tls_old, can_be_embedded
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
@@ -94,9 +94,9 @@ def get_all_domain_results():
         # v15 更新：加入新欄位 Mapping
         df = df.rename(columns={
             "domain": "Domain", "cdn_provider": "CDN Provider", "cloud_hosting": "Cloud/Hosting",
-            "multi_ip": "Multi-IP", "cname": "CNAME", "ips": "IPs", "country": "Country", 
-            "city": "City", "isp": "ISP", "tls_1_3": "TLS 1.3", "protocol": "Protocol", 
-            "issuer": "Issuer", "ssl_days": "SSL Days", "global_ping": "Global Ping", 
+            "multi_ip": "Multi-IP", "cname": "CNAME", "ips": "IPs", "country": "Country",
+            "city": "City", "isp": "ISP", "tls_1_3": "TLS 1.3", "protocol": "Protocol",
+            "issuer": "Issuer", "ssl_days": "SSL Days", "global_ping": "Global Ping",
             "simple_ping": "Simple Ping", "security_headers": "Security Headers", "tls_old": "TLS 1.0/1.1",
             "can_be_embedded": "能否被嵌入"
         })
@@ -122,8 +122,8 @@ def get_all_ip_results():
     try:
         df = pd.read_sql_query("SELECT * FROM ip_reverse", conn)
         df = df.rename(columns={
-            "input_ip": "Input_IP", "domain": "Domain", 
-            "current_resolved_ip": "Current_Resolved_IP", 
+            "input_ip": "Input_IP", "domain": "Domain",
+            "current_resolved_ip": "Current_Resolved_IP",
             "ip_match": "IP_Match", "http_status": "HTTP_Status"
         })
         if "updated_at" in df.columns: df = df.drop(columns=["updated_at"])
@@ -143,7 +143,7 @@ init_db()
 
 def get_dns_resolver():
     resolver = dns.resolver.Resolver()
-    resolver.nameservers = ['8.8.8.8', '1.1.1.1'] 
+    resolver.nameservers = ['8.8.8.8', '1.1.1.1']
     resolver.timeout = 5
     resolver.lifetime = 5
     return resolver
@@ -156,23 +156,45 @@ def parse_input_raw(raw_text):
     final_items = []
     for token in tokens:
         token = token.strip()
-        if not token: continue 
+        if not token: continue
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5\.]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
         if clean: final_items.append(clean)
     return final_items
 
+# 新增：解析輸入時，額外保留使用者輸入的「完整 URL」，供「Security Headers」與「能否被嵌入」判定使用
+# (若使用者只輸入裸域名，則 full_url 會退回 https://domain，其餘欄位判定邏輯完全不受影響)
+def parse_input_with_url(raw_text):
+    processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
+    processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
+    processed_text = processed_text.replace('未找到', '\n未找到\n')
+    tokens = re.split(r'[\s,;]+', processed_text)
+    pairs = []
+    for token in tokens:
+        token = token.strip()
+        if not token: continue
+        clean = token.replace('https://', '').replace('http://', '')
+        clean = clean.split('/')[0].split('?')[0].split(':')[0]
+        clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5\.]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
+        if not clean: continue
+        if re.match(r'^https?://', token, flags=re.IGNORECASE):
+            full_url = token
+        else:
+            full_url = f"https://{clean}"
+        pairs.append((clean, full_url))
+    return pairs
+
 # ==========================================
-#  核心檢測邏輯 
+#  核心檢測邏輯
 # ==========================================
 
 def detect_providers(cname_record, isp_name):
     cname = cname_record.lower()
-    isp = isp_name.lower() 
+    isp = isp_name.lower()
     cdns = []
     clouds = []
-    
+
     cdn_sigs = {
         "騰雲運算 Skycloud": ["skycloud", "gocname"],
         "AWS CloudFront": ["cloudfront"],
@@ -181,7 +203,7 @@ def detect_providers(cname_record, isp_name):
         "Akamai": ["akamai", "edgekey", "akamaiedge"],
         "Fastly": ["fastly", "fastly.net"],
         "Imperva (Incapsula)": ["incapdns", "imperva"],
-        "Edgio (Edgecast/Limelight)": ["edgecast", "systemcdn", "llnwd", "limelight"], 
+        "Edgio (Edgecast/Limelight)": ["edgecast", "systemcdn", "llnwd", "limelight"],
         "StackPath (MaxCDN)": ["stackpath", "maxcdn"],
         "Sucuri WAF": ["sucuri"],
         "Gcore": ["gcdn.co", "gcore"],
@@ -203,7 +225,7 @@ def detect_providers(cname_record, isp_name):
         "Upyun (又拍雲)": ["upaiyun"],
         "ArvanCloud": ["arvancloud", "arvancdn"],
     }
-    
+
     for provider, keywords in cdn_sigs.items():
         if any(kw in cname for kw in keywords) or any(kw in isp for kw in keywords):
             if f"⚡ {provider}" not in cdns:
@@ -220,13 +242,13 @@ def detect_providers(cname_record, isp_name):
         "Vultr": ["vultr", "choopa"],
         "Hetzner": ["hetzner"],
     }
-    
+
     for provider, keywords in cloud_sigs.items():
         if provider == "AWS" and any("CloudFront" in c for c in cdns): continue
         if provider == "Azure" and any("FrontDoor" in c for c in cdns): continue
         if provider == "Alibaba Cloud" and any("Alibaba CDN" in c for c in cdns): continue
         if provider == "Tencent Cloud" and any("Tencent CDN" in c for c in cdns): continue
-            
+
         if any(kw in cname for kw in keywords) or any(kw in isp for kw in keywords):
             if f"☁️ {provider}" not in clouds:
                 clouds.append(f"☁️ {provider}")
@@ -257,7 +279,7 @@ def run_globalping_api(domain):
                             return f"{success_count}/{len(results)} OK"
                 return "Timeout"
             elif resp.status_code == 429:
-                time.sleep(5) 
+                time.sleep(5)
                 continue
             elif resp.status_code == 400: return "Invalid Domain"
             else:
@@ -276,43 +298,43 @@ def run_simple_ping(domain):
             return f"⚠️ {resp.status_code} (HTTP)"
         except: return "❌ Fail"
 
-# 更新：依照要求精準匹配 6 大 Security Headers 與判斷是否能被嵌入 (含 CSP 判斷)
-def check_security_headers(domain):
+# 更新：僅負責偵測 6 大 Security Headers 是否存在 (改用「域名內的完整 URL」檢測)
+def check_security_headers(url):
     headers_to_check = [
-        'Strict-Transport-Security', 'Content-Security-Policy', 
-        'X-Frame-Options', 'X-Content-Type-Options', 
+        'Strict-Transport-Security', 'Content-Security-Policy',
+        'X-Frame-Options', 'X-Content-Type-Options',
         'Referrer-Policy', 'Permissions-Policy'
     ]
     try:
-        resp = requests.get(f"https://{domain}", timeout=5, verify=False)
-        
-        # 1. 抓取存在的標頭
+        resp = requests.get(url, timeout=5, verify=False)
         found = [h for h in headers_to_check if h in resp.headers]
-        found_str = ", ".join(found) if found else "❌ 無"
-        
-        # 2. 判斷能否被嵌入 (利用 X-Frame-Options 與 Content-Security-Policy)
+        return ", ".join(found) if found else "❌ 無"
+    except:
+        return "-"
+
+# 新增：能否被嵌入判定，改用「域名內的完整 URL」發送請求 (不再固定打網域根目錄 https://domain)
+def check_embeddable(url):
+    try:
+        resp = requests.get(url, timeout=5, verify=False)
+
+        # 利用 X-Frame-Options 與 Content-Security-Policy 判斷能否被嵌入
         x_frame = resp.headers.get('X-Frame-Options', '').upper()
         csp = resp.headers.get('Content-Security-Policy', '').lower()
-        
+
         is_blocked = False
-        
+
         # 條件 1: X-Frame-Options 包含 DENY 或 SAMEORIGIN
         if 'DENY' in x_frame or 'SAMEORIGIN' in x_frame:
             is_blocked = True
-            
+
         # 條件 2: CSP 包含 frame-ancestors 'none' 或 frame-ancestors 'self'
         if "frame-ancestors 'none'" in csp or "frame-ancestors 'self'" in csp:
             is_blocked = True
-            
+
         # 依照要求：可以被嵌入顯示 ❗️，不能被嵌入顯示 ✅
-        if is_blocked:
-            embeddable = "✅ 否"
-        else:
-            embeddable = "❗️ 是"
-            
-        return found_str, embeddable
+        return "✅ 否" if is_blocked else "❗️ 是"
     except:
-        return "-", "-"
+        return "-"
 
 # v15 新增功能：TLS 1.0 / 1.1 關閉測試
 def check_legacy_tls(domain):
@@ -324,31 +346,31 @@ def check_legacy_tls(domain):
             ctx.verify_mode = ssl.CERT_NONE
             ctx.minimum_version = tls_ver
             ctx.maximum_version = tls_ver
-            
+
             # 關鍵修正：強制將 OpenSSL 的安全級別降至 0，允許發起舊版與弱加密連線
             try:
                 ctx.set_ciphers('DEFAULT@SECLEVEL=0')
             except:
-                pass 
+                pass
 
             with socket.create_connection((domain, 443), timeout=3) as sock:
                 with ctx.wrap_socket(sock, server_hostname=domain):
                     opened.append(ver_name)
         except Exception as e:
             # 如果還是出錯，代表伺服器拒絕，或是握手失敗
-            pass 
-            
+            pass
+
     if not opened:
         return "✅ 皆已關閉"
     return f"❌ 未關閉 ({', '.join(opened)})"
 
 def process_domain_audit(args):
-    index, domain, config = args
+    index, domain, url, config = args
     result = {
         "Domain": domain, "CDN Provider": "-", "Cloud/Hosting": "-", "Multi-IP": "-",
         "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
-        "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", 
-        "Global Ping": "-", "Simple Ping": "-", 
+        "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-",
+        "Global Ping": "-", "Simple Ping": "-",
         "Security Headers": "-", "TLS 1.0/1.1": "-", "能否被嵌入": "-"
     }
     if "未找到" in domain:
@@ -384,19 +406,19 @@ def process_domain_audit(args):
                             try:
                                 time.sleep(random.uniform(0.5, 1.5))
                                 resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,org,status", timeout=5).json()
-                                
+
                                 if resp.get("status") == "success":
                                     result["Country"] = resp.get("country", "-")
                                     result["City"] = resp.get("city", "-")
-                                    
+
                                     isp_val = resp.get("isp", "")
                                     org_val = resp.get("org", "")
-                                    
+
                                     if isp_val and org_val and isp_val != org_val:
                                         full_isp = f"{isp_val} ({org_val})"
                                     else:
                                         full_isp = org_val or isp_val or "-"
-                                        
+
                                     result["ISP"] = full_isp
                                     break
                             except: time.sleep(1)
@@ -413,10 +435,10 @@ def process_domain_audit(args):
             try:
                 sock = socket.create_connection((domain, 443), timeout=5)
                 conn = ctx.wrap_socket(sock, server_hostname=domain)
-                
+
                 result["Protocol"] = conn.version()
                 result["TLS 1.3"] = "✅ Yes" if conn.version() == 'TLSv1.3' else "❌ No"
-                
+
                 cert = crypto.load_certificate(crypto.FILETYPE_ASN1, conn.getpeercert(binary_form=True))
                 issuer_obj = cert.get_issuer()
                 result["Issuer"] = issuer_obj.O if issuer_obj.O else (issuer_obj.CN if issuer_obj.CN else "Unknown")
@@ -425,15 +447,14 @@ def process_domain_audit(args):
             except: result["Protocol"] = "Connect Fail"
             finally:
                 if conn: conn.close()
-                
+
             # v15 新增：檢測舊版 TLS
             result["TLS 1.0/1.1"] = check_legacy_tls(domain)
 
-        # v15 新增：檢測 Security Headers
+        # v15 新增：檢測 Security Headers 與能否被嵌入 (兩者皆改用完整 URL 檢測)
         if config['security_header']:
-            sec_headers, can_embed = check_security_headers(domain)
-            result["Security Headers"] = sec_headers
-            result["能否被嵌入"] = can_embed
+            result["Security Headers"] = check_security_headers(url)
+            result["能否被嵌入"] = check_embeddable(url)
 
         if config['global_ping']: result["Global Ping"] = run_globalping_api(domain)
         if config['simple_ping']: result["Simple Ping"] = run_simple_ping(domain)
@@ -450,7 +471,7 @@ def check_single_domain_status(domain, target_ip):
         current_ips = [str(r.address) for r in a_ans]
         status_result["Current_Resolved_IP"] = ", ".join(current_ips)
     except: status_result["Current_Resolved_IP"] = "No DNS Record"
-    
+
     if current_ips:
         if target_ip in current_ips: status_result["IP_Match"] = "✅ Yes"
         else: status_result["IP_Match"] = "❌ No"
@@ -512,25 +533,25 @@ tab1, tab2, tab3, tab4 = st.tabs([" 域名檢測", " IP 反查域名 (VT)", " �
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("騰雲批量域名體檢工具-海軍 v15版")
+    st.header("騰雲批量域名體檢工具-UAT v15版")
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
         check_dns = st.checkbox("DNS 解析 (基礎)", value=True, help="解析 A 紀錄與 CNAME，速度快")
         check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True, help="查詢 IP 的地理位置，需呼叫外部 API，速度較慢")
-        
+
         # v15 更新：新增 Security Header 勾選
         check_ssl = st.checkbox("SSL & TLS 憑證", value=True, help="顯示憑證組織、過期日，並檢查 TLS 1.3 支援與舊版 TLS (1.0/1.1) 是否關閉")
         check_security = st.checkbox("Security Header", value=True, help="檢測項目: Strict-Transport-Security, Content-Security-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy")
-        
+
         st.subheader("2. 連線測試")
         check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從目前主機發送請求，適合內網或本機測試")
         check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="透過 API 從國外節點測試，速度較慢")
-        
+
         st.divider()
         st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
-        
+
         st.info("💡 速度設定建議：")
         st.markdown("""
         * **(注意！ 併發數超過 1 ， 導出順序會是亂的!)**
@@ -540,31 +561,40 @@ with tab1:
         """)
 
     with col2:
-        raw_input = st.text_area("輸入域名 (會自動跳過已掃描項目)", height=150, placeholder="example.com\nwww.google.com")
+        raw_input = st.text_area(
+            "輸入域名 (會自動跳過已掃描項目)",
+            height=150,
+            placeholder="https://example.com/index.html\nwww.google.com",
+            help="若要精準判斷「Security Headers」與「能否被嵌入」，請輸入該域名內的完整 URL (含路徑)；若只輸入裸域名，則以該域名首頁判定。其餘檢測項目 (DNS/SSL/Ping 等) 一律以域名本身為準，不受路徑影響。"
+        )
         if st.button(" 開始掃描域名", type="primary"):
-            full_list = parse_input_raw(raw_input)
+            parsed_pairs = parse_input_with_url(raw_input)
+            full_list = [d for d, _ in parsed_pairs]
+            url_map = {}
+            for d, u in parsed_pairs:
+                url_map.setdefault(d, u)
             existing_domains = get_existing_domains()
             domain_list = [d for d in full_list if d not in existing_domains]
             skipped_count = len(full_list) - len(domain_list)
-            
+
             if not domain_list:
                 if skipped_count > 0: st.success(f"🎉 所有 {skipped_count} 筆域名都已經在資料庫中了！請直接從側邊欄下載。")
                 else: st.warning("請輸入域名")
             else:
                 if skipped_count > 0: st.info(f"⏩ 已自動跳過 {skipped_count} 筆重複資料，本次將掃描 {len(domain_list)} 筆。")
-                
+
                 # v15 更新：寫入 config
                 config = {
-                    'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl, 
+                    'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl,
                     'global_ping': check_global_ping, 'simple_ping': check_simple_ping,
                     'security_header': check_security
                 }
-                
+
                 indexed_domains = list(enumerate(domain_list))
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = {executor.submit(process_domain_audit, (idx, dom, config)): idx for idx, dom in indexed_domains}
+                    futures = {executor.submit(process_domain_audit, (idx, dom, url_map.get(dom, f"https://{dom}"), config)): idx for idx, dom in indexed_domains}
                     completed = 0
                     for future in concurrent.futures.as_completed(futures):
                         data = future.result()
@@ -613,7 +643,7 @@ with tab2:
                                         "Current_Resolved_IP": v_res["Current_Resolved_IP"], "IP_Match": v_res["IP_Match"], "HTTP_Status": v_res["HTTP_Status"]
                                     })
                     else: rows_to_save.append({"Input_IP": ip, "Domain": f"Error: {status}", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
-                    
+
                     for row in rows_to_save: save_ip_result(row)
                     vt_counter += 1
                     if i < len(ip_list) - 1:
@@ -626,7 +656,7 @@ with tab2:
                 st.balloons()
                 time.sleep(1)
                 st.rerun()
-                
+
     # v15 更新：直接在網頁下方顯示反查資料庫內容
     if not df_ips.empty:
         st.divider()
@@ -644,9 +674,9 @@ with tab3:
     * **舊版 TLS 淘汰檢查**：SSL & TLS 憑證模組中，新增 `TLS 1.0 / 1.1` 是否已徹底關閉的偵測功能，並將狀態匯出至報表中的專屬欄位。
     * **反查功能介面優化**：在「IP 反查域名 (VT)」頁籤下方，新增查詢結果的 DataFrame 即時預覽，免去每次都要下載 DB CSV 檔才能看結果的麻煩。
     * **資源整合**：新增「更新紀錄」與「操作手冊」獨立頁籤，幫助業務團隊快速查閱文件與歷史異動。
-    
+
     ---
-    
+
     ### ⏪ 歷史版本回顧
     * **v14 版**：優化 GeoIP 判斷邏輯，解決組織 (Org) 與 ISP 名稱重複顯示的問題；新增域名檢測結果 DataFrame 直接預覽功能。
     * **v13 版**：導入 SQLite 本地端資料庫，支援「自動跳過已掃描項目」與「斷點續傳」防護機制。
@@ -657,6 +687,6 @@ with tab4:
     st.header("📖 操作手冊")
     st.markdown("""
     如需深入了解工具的操作步驟、各項檢測參數說明與排錯指南，請參閱線上版操作手冊。
-    
+
     👉 **[點擊此處查看：Andy 的批量域名體檢工具 - 操作手冊](https://hackmd.io/@iPQqj0f3SIqBCfug7yl49Q/rJq9Gzgmfl)**
     """)
