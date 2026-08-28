@@ -19,7 +19,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題 (更新為 v16)
-st.set_page_config(page_title="騰雲運算批量域名體檢工具-海軍 v16版", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (海軍 v16版)", layout="wide")
 
 # ==========================================
 #  資料庫 (SQLite) 核心模組
@@ -47,6 +47,7 @@ def init_db():
         "ALTER TABLE domain_audit ADD COLUMN tls_old TEXT DEFAULT '-'",
         "ALTER TABLE domain_audit ADD COLUMN can_be_embedded TEXT DEFAULT '-'",
         "ALTER TABLE domain_audit ADD COLUMN server_header TEXT DEFAULT '-'",
+        "ALTER TABLE domain_audit ADD COLUMN scanned_url TEXT DEFAULT '-'",
     ]:
         try:
             c.execute(col_sql)
@@ -77,18 +78,19 @@ def save_domain_result(data):
     c = conn.cursor()
     try:
         # v15 更新：加入 security_headers, tls_old, can_be_embedded 與 server_header 寫入
+        # 新增：加入 scanned_url 寫入
         c.execute('''
             INSERT OR REPLACE INTO domain_audit (
                 domain, cdn_provider, cloud_hosting, multi_ip, cname, ips,
                 country, city, isp, tls_1_3, protocol, issuer, ssl_days,
-                global_ping, simple_ping, security_headers, tls_old, can_be_embedded, server_header
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                global_ping, simple_ping, security_headers, tls_old, can_be_embedded, server_header, scanned_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             data['Domain'], data['CDN Provider'], data['Cloud/Hosting'], data['Multi-IP'],
             data['CNAME'], data['IPs'], data['Country'], data['City'], data['ISP'],
             data['TLS 1.3'], data['Protocol'], data['Issuer'], str(data['SSL Days']),
             data['Global Ping'], data['Simple Ping'], data['Security Headers'], data['TLS 1.0/1.1'],
-            data['能否被嵌入'], data['Server Header']
+            data['能否被嵌入'], data['Server Header'], data['URL']
         ))
         conn.commit()
     except Exception as e: print(f"DB Error: {e}")
@@ -105,9 +107,15 @@ def get_all_domain_results():
             "city": "City", "isp": "ISP", "tls_1_3": "TLS 1.3", "protocol": "Protocol",
             "issuer": "Issuer", "ssl_days": "SSL Days", "global_ping": "Global Ping",
             "simple_ping": "Simple Ping", "security_headers": "Security Headers", "tls_old": "TLS 1.0/1.1",
-            "can_be_embedded": "能否被嵌入", "server_header": "Server Header"
+            "can_be_embedded": "能否被嵌入", "server_header": "Server Header", "scanned_url": "URL"
         })
         if "updated_at" in df.columns: df = df.drop(columns=["updated_at"])
+        # 新增：把 URL 欄位排到 Domain 右邊
+        cols = list(df.columns)
+        if "URL" in cols and "Domain" in cols:
+            cols.remove("URL")
+            cols.insert(cols.index("Domain") + 1, "URL")
+            df = df[cols]
         return df
     finally: conn.close()
 
@@ -170,7 +178,8 @@ def parse_input_raw(raw_text):
         if clean: final_items.append(clean)
     return final_items
 
-# 新增：解析輸入時，額外保留使用者輸入的「完整 URL」，供「Security Headers」、「Server Header」與「能否被嵌入」判定使用
+# 新增：解析輸入時，額外保留使用者輸入的「完整 URL」，供「Security Headers」、「Server Header」、
+# 「能否被嵌入」與「Simple Ping」判定使用
 # (若使用者只輸入裸域名，則 full_url 會退回 https://domain，其餘欄位判定邏輯完全不受影響)
 def parse_input_with_url(raw_text):
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
@@ -294,14 +303,15 @@ def run_globalping_api(domain):
         except: time.sleep(1)
     return "Too Busy"
 
-def run_simple_ping(domain):
+def run_simple_ping(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
+        resp = requests.get(url, timeout=10, headers=headers, verify=False)
         return f"✅ {resp.status_code}"
     except:
         try:
-            resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
+            http_url = url.replace('https://', 'http://', 1) if url.startswith('https://') else url
+            resp = requests.get(http_url, timeout=10, headers=headers)
             return f"⚠️ {resp.status_code} (HTTP)"
         except: return "❌ Fail"
 
@@ -383,7 +393,7 @@ def check_legacy_tls(domain):
 def process_domain_audit(args):
     index, domain, url, config = args
     result = {
-        "Domain": domain, "CDN Provider": "-", "Cloud/Hosting": "-", "Multi-IP": "-",
+        "Domain": domain, "URL": url, "CDN Provider": "-", "Cloud/Hosting": "-", "Multi-IP": "-",
         "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
         "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-",
         "Global Ping": "-", "Simple Ping": "-",
@@ -477,7 +487,7 @@ def process_domain_audit(args):
             result["Server Header"] = check_server_header(url)
 
         if config['global_ping']: result["Global Ping"] = run_globalping_api(domain)
-        if config['simple_ping']: result["Simple Ping"] = run_simple_ping(domain)
+        if config['simple_ping']: result["Simple Ping"] = run_simple_ping(url)
 
     except Exception as e: result["IPs"] = str(e)
     return (index, result)
@@ -587,7 +597,7 @@ with tab1:
             "輸入域名 (會自動跳過已掃描項目)",
             height=150,
             placeholder="https://example.com/index.html\nwww.google.com",
-            help="若要精準判斷「Security Headers」、「Server 標頭」與「能否被嵌入」，請輸入該域名內的完整 URL (含路徑)；若只輸入裸域名，則以該域名首頁判定。其餘檢測項目 (DNS/SSL/Ping 等) 一律以域名本身為準，不受路徑影響。"
+            help="若要精準判斷「Security Headers」、「Server 標頭」、「能否被嵌入」與「Simple Ping」，請輸入該域名內的完整 URL (含路徑)；若只輸入裸域名，則以該域名首頁判定。其餘檢測項目 (DNS/SSL 等) 一律以域名本身為準，不受路徑影響。"
         )
         if st.button(" 開始掃描域名", type="primary"):
             parsed_pairs = parse_input_with_url(raw_input)
@@ -693,6 +703,8 @@ with tab3:
     ###  v16 版本更新 (Current)
     * **新增 Host 探測**：獨立於 Security Header 判定與匯出之外，新增偵測並匯出 HTTP 回應中的 `Server` 標頭 (Host 主機/伺服器資訊)，可看出伺服器軟體與版本 (如 nginx, Apache, cloudflare 等)，結果單獨存成報表專屬欄位。
     * **新增惡意網站模擬**：新增獨立頁籤，整合外部 Clickjacking 測試工具，可直接在頁面內嵌入模擬畫面，用於示範/驗證目標網站是否容易遭受點擊劫持攻擊。
+    * **修正 Simple Ping 路徑判斷**：Simple Ping 改用「域名內的完整 URL」檢測，不再固定打網域根目錄，避免輸入特定頁面路徑時仍顯示根目錄的連線結果。
+    * **匯出報表新增 URL 欄位**：域名報告在 Domain 欄位右邊新增 URL 欄位，記錄該筆資料實際掃描的完整網址。
 
     ---
 
@@ -716,4 +728,4 @@ with tab5:
     st.header("⚠️ 惡意網站模擬 (Clickjacking 測試工具)")
     st.caption("整合外部測試工具，用於示範/驗證目標網站是否容易遭受 Clickjacking (點擊劫持) 攻擊。")
     st.markdown("🔗 [如果下方畫面無法顯示，點此在新分頁開啟](https://skcandyhuang-maker.github.io/clickjacking_normal/)")
-    components.iframe("https://skcandyhuang-maker.github.io/clickjacking_normal/", height=1000, scrolling=True)
+    components.iframe("https://skcandyhuang-maker.github.io/clickjacking_normal/", height=800, scrolling=True)
