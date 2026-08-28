@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import dns.resolver
 import requests
@@ -17,8 +18,8 @@ import urllib3
 # 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 設定頁面標題 (更新為 v15)
-st.set_page_config(page_title="Andy的全能網管工具 (海軍 v15版)", layout="wide")
+# 設定頁面標題 (更新為 v16)
+st.set_page_config(page_title="騰雲運算批量域名體檢工具-海軍 v16版", layout="wide")
 
 # ==========================================
 #  資料庫 (SQLite) 核心模組
@@ -39,13 +40,18 @@ def init_db():
     ''')
 
     # v15 新增欄位：動態升級現有資料表，若無欄位則自動加上
-    try:
-        c.execute("ALTER TABLE domain_audit ADD COLUMN security_headers TEXT DEFAULT '-'")
-        c.execute("ALTER TABLE domain_audit ADD COLUMN tls_old TEXT DEFAULT '-'")
-        # 這次新增的欄位
-        c.execute("ALTER TABLE domain_audit ADD COLUMN can_be_embedded TEXT DEFAULT '-'")
-    except sqlite3.OperationalError:
-        pass # 欄位已存在則忽略
+    # 修正：每個 ALTER 各自獨立 try/except，避免某一欄「已存在」的例外
+    # 連帶擋住後面尚未新增的欄位 (例如舊 DB 已有前三欄，但還沒有 server_header)
+    for col_sql in [
+        "ALTER TABLE domain_audit ADD COLUMN security_headers TEXT DEFAULT '-'",
+        "ALTER TABLE domain_audit ADD COLUMN tls_old TEXT DEFAULT '-'",
+        "ALTER TABLE domain_audit ADD COLUMN can_be_embedded TEXT DEFAULT '-'",
+        "ALTER TABLE domain_audit ADD COLUMN server_header TEXT DEFAULT '-'",
+    ]:
+        try:
+            c.execute(col_sql)
+        except sqlite3.OperationalError:
+            pass # 欄位已存在則忽略
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS ip_reverse (
@@ -70,18 +76,19 @@ def save_domain_result(data):
     conn = sqlite3.connect(DB_FILE, timeout=30)
     c = conn.cursor()
     try:
-        # v15 更新：加入 security_headers, tls_old 與 can_be_embedded 寫入
+        # v15 更新：加入 security_headers, tls_old, can_be_embedded 與 server_header 寫入
         c.execute('''
             INSERT OR REPLACE INTO domain_audit (
                 domain, cdn_provider, cloud_hosting, multi_ip, cname, ips,
                 country, city, isp, tls_1_3, protocol, issuer, ssl_days,
-                global_ping, simple_ping, security_headers, tls_old, can_be_embedded
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                global_ping, simple_ping, security_headers, tls_old, can_be_embedded, server_header
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             data['Domain'], data['CDN Provider'], data['Cloud/Hosting'], data['Multi-IP'],
             data['CNAME'], data['IPs'], data['Country'], data['City'], data['ISP'],
             data['TLS 1.3'], data['Protocol'], data['Issuer'], str(data['SSL Days']),
-            data['Global Ping'], data['Simple Ping'], data['Security Headers'], data['TLS 1.0/1.1'], data['能否被嵌入']
+            data['Global Ping'], data['Simple Ping'], data['Security Headers'], data['TLS 1.0/1.1'],
+            data['能否被嵌入'], data['Server Header']
         ))
         conn.commit()
     except Exception as e: print(f"DB Error: {e}")
@@ -98,7 +105,7 @@ def get_all_domain_results():
             "city": "City", "isp": "ISP", "tls_1_3": "TLS 1.3", "protocol": "Protocol",
             "issuer": "Issuer", "ssl_days": "SSL Days", "global_ping": "Global Ping",
             "simple_ping": "Simple Ping", "security_headers": "Security Headers", "tls_old": "TLS 1.0/1.1",
-            "can_be_embedded": "能否被嵌入"
+            "can_be_embedded": "能否被嵌入", "server_header": "Server Header"
         })
         if "updated_at" in df.columns: df = df.drop(columns=["updated_at"])
         return df
@@ -163,7 +170,7 @@ def parse_input_raw(raw_text):
         if clean: final_items.append(clean)
     return final_items
 
-# 新增：解析輸入時，額外保留使用者輸入的「完整 URL」，供「Security Headers」與「能否被嵌入」判定使用
+# 新增：解析輸入時，額外保留使用者輸入的「完整 URL」，供「Security Headers」、「Server Header」與「能否被嵌入」判定使用
 # (若使用者只輸入裸域名，則 full_url 會退回 https://domain，其餘欄位判定邏輯完全不受影響)
 def parse_input_with_url(raw_text):
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
@@ -202,7 +209,7 @@ def detect_providers(cname_record, isp_name):
         "Azure FrontDoor/CDN": ["azurefd", "azureedge", "msecnd", "trafficmanager"],
         "Akamai": ["akamai", "edgekey", "akamaiedge"],
         "Fastly": ["fastly", "fastly.net"],
-        "Imperva (Incapsula)": ["incapdns", "imperva"],
+        "Imperva (Incapsula)": ["incapdns", "imperva", "incapsula"],
         "Edgio (Edgecast/Limelight)": ["edgecast", "systemcdn", "llnwd", "limelight"],
         "StackPath (MaxCDN)": ["stackpath", "maxcdn"],
         "Sucuri WAF": ["sucuri"],
@@ -312,6 +319,15 @@ def check_security_headers(url):
     except:
         return "-"
 
+# 新增：獨立的 Server 標頭偵測 (只抓 Server 這個 header，不與 Security Header 合併匯出)
+def check_server_header(url):
+    try:
+        resp = requests.get(url, timeout=5, verify=False)
+        server = resp.headers.get('Server', '')
+        return server if server else "❌ 無"
+    except:
+        return "-"
+
 # 新增：能否被嵌入判定，改用「域名內的完整 URL」發送請求 (不再固定打網域根目錄 https://domain)
 def check_embeddable(url):
     try:
@@ -371,7 +387,7 @@ def process_domain_audit(args):
         "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
         "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-",
         "Global Ping": "-", "Simple Ping": "-",
-        "Security Headers": "-", "TLS 1.0/1.1": "-", "能否被嵌入": "-"
+        "Security Headers": "-", "TLS 1.0/1.1": "-", "能否被嵌入": "-", "Server Header": "-"
     }
     if "未找到" in domain:
         result["IPs"] = "❌ Source Not Found"
@@ -456,6 +472,10 @@ def process_domain_audit(args):
             result["Security Headers"] = check_security_headers(url)
             result["能否被嵌入"] = check_embeddable(url)
 
+        # 新增：獨立的 Server 標頭偵測 (獨立於 Security Header 判定與匯出)
+        if config['server_header']:
+            result["Server Header"] = check_server_header(url)
+
         if config['global_ping']: result["Global Ping"] = run_globalping_api(domain)
         if config['simple_ping']: result["Simple Ping"] = run_simple_ping(domain)
 
@@ -528,12 +548,12 @@ with st.sidebar:
         st.download_button(f"📄 下載 IP 反查報告 ({len(df_ips)}筆)", df_ips.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_db.csv", "text/csv")
     else: st.write("IP 反查資料庫為空")
 
-# v15 更新：擴增為 4 個分頁
-tab1, tab2, tab3, tab4 = st.tabs([" 域名檢測", " IP 反查域名 (VT)", " 更新紀錄", " 操作手冊"])
+# v15 更新：擴增為 5 個分頁 (新增惡意網站模擬)
+tab1, tab2, tab3, tab4, tab5 = st.tabs([" 域名檢測", " IP 反查域名 (VT)", " 更新紀錄", " 操作手冊", "⚠️ 惡意網站模擬"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("騰雲運算批量域名體檢工具-海軍 v15版")
+    st.header("騰雲運算批量域名體檢工具-海軍 v16版")
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
@@ -543,6 +563,8 @@ with tab1:
         # v15 更新：新增 Security Header 勾選
         check_ssl = st.checkbox("SSL & TLS 憑證", value=True, help="顯示憑證組織、過期日，並檢查 TLS 1.3 支援與舊版 TLS (1.0/1.1) 是否關閉")
         check_security = st.checkbox("Security Header", value=True, help="檢測項目: Strict-Transport-Security, Content-Security-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy")
+        # 新增：獨立的 Server 標頭偵測勾選 (放在 Security Header 底下)
+        check_server = st.checkbox("Server 標頭偵測", value=True, help="獨立偵測並匯出 HTTP 回應中的 Server 標頭 (可看出伺服器軟體/版本，如 nginx, Apache, cloudflare 等)，不與 Security Header 合併匯出。")
 
         st.subheader("2. 連線測試")
         check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從目前主機發送請求，適合內網或本機測試")
@@ -565,7 +587,7 @@ with tab1:
             "輸入域名 (會自動跳過已掃描項目)",
             height=150,
             placeholder="https://example.com/index.html\nwww.google.com",
-            help="若要精準判斷「Security Headers」與「能否被嵌入」，請輸入該域名內的完整 URL (含路徑)；若只輸入裸域名，則以該域名首頁判定。其餘檢測項目 (DNS/SSL/Ping 等) 一律以域名本身為準，不受路徑影響。"
+            help="若要精準判斷「Security Headers」、「Server 標頭」與「能否被嵌入」，請輸入該域名內的完整 URL (含路徑)；若只輸入裸域名，則以該域名首頁判定。其餘檢測項目 (DNS/SSL/Ping 等) 一律以域名本身為準，不受路徑影響。"
         )
         if st.button(" 開始掃描域名", type="primary"):
             parsed_pairs = parse_input_with_url(raw_input)
@@ -587,7 +609,7 @@ with tab1:
                 config = {
                     'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl,
                     'global_ping': check_global_ping, 'simple_ping': check_simple_ping,
-                    'security_header': check_security
+                    'security_header': check_security, 'server_header': check_server
                 }
 
                 indexed_domains = list(enumerate(domain_list))
@@ -668,16 +690,14 @@ with tab2:
 with tab3:
     st.header("🔄 更新紀錄")
     st.markdown("""
-    ###  v15 版本更新 (Current)
-    * **新增安控檢測**：左側「檢測項目」新增 `Security Header` 掃描，可偵測網域是否配置 HSTS, X-Frame-Options, X-Content-Type-Options 等主流安全標頭。
-    * **新增防嵌入判定**：自動利用 `X-Frame-Options` (DENY/SAMEORIGIN) 與 `Content-Security-Policy` (frame-ancestors) 判定網站「能否被嵌入」並匯出於報表專屬欄位。
-    * **舊版 TLS 淘汰檢查**：SSL & TLS 憑證模組中，新增 `TLS 1.0 / 1.1` 是否已徹底關閉的偵測功能，並將狀態匯出至報表中的專屬欄位。
-    * **反查功能介面優化**：在「IP 反查域名 (VT)」頁籤下方，新增查詢結果的 DataFrame 即時預覽，免去每次都要下載 DB CSV 檔才能看結果的麻煩。
-    * **資源整合**：新增「更新紀錄」與「操作手冊」獨立頁籤，幫助業務團隊快速查閱文件與歷史異動。
+    ###  v16 版本更新 (Current)
+    * **新增 Host 探測**：獨立於 Security Header 判定與匯出之外，新增偵測並匯出 HTTP 回應中的 `Server` 標頭 (Host 主機/伺服器資訊)，可看出伺服器軟體與版本 (如 nginx, Apache, cloudflare 等)，結果單獨存成報表專屬欄位。
+    * **新增惡意網站模擬**：新增獨立頁籤，整合外部 Clickjacking 測試工具，可直接在頁面內嵌入模擬畫面，用於示範/驗證目標網站是否容易遭受點擊劫持攻擊。
 
     ---
 
     ### ⏪ 歷史版本回顧
+    * **v15 版**：新增 Security Header 掃描與防嵌入判定 (能否被嵌入)，並改為可用完整 URL (含路徑) 精準檢測；新增舊版 TLS (1.0/1.1) 淘汰檢查；IP 反查頁籤新增結果即時預覽；新增「更新紀錄」與「操作手冊」獨立頁籤。
     * **v14 版**：優化 GeoIP 判斷邏輯，解決組織 (Org) 與 ISP 名稱重複顯示的問題；新增域名檢測結果 DataFrame 直接預覽功能。
     * **v13 版**：導入 SQLite 本地端資料庫，支援「自動跳過已掃描項目」與「斷點續傳」防護機制。
     """)
@@ -690,3 +710,10 @@ with tab4:
 
     👉 **[點擊此處查看：Andy 的批量域名體檢工具 - 操作手冊](https://hackmd.io/@iPQqj0f3SIqBCfug7yl49Q/rJq9Gzgmfl)**
     """)
+
+# --- 分頁 5: 惡意網站模擬 (新增) ---
+with tab5:
+    st.header("⚠️ 惡意網站模擬 (Clickjacking 測試工具)")
+    st.caption("整合外部測試工具，用於示範/驗證目標網站是否容易遭受 Clickjacking (點擊劫持) 攻擊。")
+    st.markdown("🔗 [如果下方畫面無法顯示，點此在新分頁開啟](https://skcandyhuang-maker.github.io/clickjacking_normal/)")
+    components.iframe("https://skcandyhuang-maker.github.io/clickjacking_normal/", height=1000, scrolling=True)
